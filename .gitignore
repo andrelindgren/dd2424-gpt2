@@ -14,5 +14,4 @@ __pycache__/
 predictions/*.csv
 predictions/*.txt
 
-
 colab.local.ipynb
