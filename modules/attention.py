@@ -1,7 +1,10 @@
+import math
+
 import torch
 
 from einops import rearrange
 from torch import nn
+import torch.nn.functional as F
 
 
 class CausalSelfAttention(nn.Module):
@@ -32,9 +35,50 @@ class CausalSelfAttention(nn.Module):
     return proj
 
   def attention(self, key, query, value, attention_mask):
+    # key, query, value: [bs, h, t, d]
+    # h = num_attention_heads
+    # t = seq_len
+    # d = attention_head_size
+    seq_len = key.size(2)
 
-    ### YOUR CODE HERE
-    raise NotImplementedError
+    # scores = Q @ K^T / sqrt(d)
+    # Transpose: [bs, h, t, d] -> [bs, h, d, t]
+    # [bs, h, t, d] @ [bs, h, d, t] = [bs, h, t, t]
+    scores = torch.matmul(query, key.transpose(-1, -2)) / math.sqrt(self.attention_head_size)
+
+    # Causal mask: position i may only attend to positions <= i
+    # Upper triangle: [t, t]
+    causal_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool, device=scores.device), diagonal=1)
+
+    # Masked slots with -inf will give softmax roughly 0
+    # Have to use dtype min and not -inf because of problems with NaN
+    # [bs, h, t, t] + [t, t] = [bs, h, t, t]
+    scores = scores.masked_fill(causal_mask, torch.finfo(scores.dtype).min)
+
+    # Attention padding mask adds large negative number which give softmax roughly 0
+    # [bs, h, t, t] + [bs, 1, 1, t] = [bs, h, t, t]
+    scores = scores + attention_mask
+
+    # softmax over keys (last dim)
+    # [bs, h, t, t] -> [bs, h, t, t]
+    attn_probs = F.softmax(scores, dim=-1)
+
+    # Dropout for attention, doesn't change shape
+    # [bs, h, t, t] -> [bs, h, t, t]
+    attn_probs = self.dropout(attn_probs)
+
+    # attn_value = P @ V:
+    # [bs, h, t, t] @ [bs, h, t, d] = [bs, h, t, d]
+    attn_value = torch.matmul(attn_probs, value)
+
+    # Rearrange
+    # [bs, h, t, d] -> [bs, t, h, d]
+    attn_value = rearrange(attn_value, 'b h t d -> b t h d')
+    # [bs, t, h, d] -> [bs, t, h*d]
+    attn_value = rearrange(attn_value, 'b t h d -> b t (h d)')
+
+    # [bs, t, hidden_size]
+    return attn_value
 
 
   def forward(self, hidden_states, attention_mask):
