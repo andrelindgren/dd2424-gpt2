@@ -69,7 +69,7 @@ class AdamW(Optimizer):
                 # m, v = state["exp_avg"], state["exp_avg_sq"]
                 exp_avg, exp_avg_sq = state["exp_avg"], state["exp_avg_sq"]
 
-                # t = t +1
+                # t = t + 1
                 state["step"] += 1
                 t = state["step"]
 
@@ -96,6 +96,11 @@ class AdamW(Optimizer):
 
                 # 4. Apply weight decay after the main gradient-based updates.
                 if weight_decay != 0.0:
+                    # Deviation from paper https://arxiv.org/pdf/1711.05101
+                    # Alg. 2 row 12 have weight decay term be:  theta_t = theta_t − eta_t * lambda * theta_t
+                    # But because group["lr"] = alpha * eta_t
+                    # We must also multiply the weight decay with alpha so they match
+                    #
                     # theta_t = theta_t − alpha * lambda * theta_t
                     # p.data -= alpha * weight_decay * p.data
                     p.data.add_(p.data, alpha=-alpha * weight_decay)
