@@ -60,8 +60,8 @@ class SonnetGPT(nn.Module):
     not just the last token! This will allow our model to learn the natural language distribution that composes sonnets,
     not just the distribution over next tokens for the last token!
     """
-    ### YOUR CODE HERE
-    raise NotImplementedError
+    hidden_states = self.gpt(input_ids, attention_mask)['last_hidden_state']
+    return self.gpt.hidden_state_to_token(hidden_states)
 
 
   def get_device(self):
@@ -182,13 +182,13 @@ def train(args):
       print(f'{batch[1]}{output[1]}\n\n')
 
     # TODO: consider a stopping condition to prevent overfitting on the small dataset of sonnets.
-    save_model(model, optimizer, args, f'{epoch}_{args.filepath}')
+    save_model(model, optimizer, args, args.filepath)
 
 
 @torch.no_grad()
 def generate_submission_sonnets(args):
   device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
-  saved = torch.load(f'{args.epochs-1}_{args.filepath}', weights_only=False)
+  saved = torch.load(args.filepath, weights_only=False)
 
   model = SonnetGPT(saved['args'])
   model.load_state_dict(saved['model'])
@@ -209,7 +209,7 @@ def generate_submission_sonnets(args):
 
     print(f'{decoded_output}\n\n')
 
-  with open(args.sonnet_out, "w+") as f:
+  with open(args.sonnet_out, "w+", encoding='utf-8') as f:
     f.write(f"--Generated Sonnets-- \n\n")
     for sonnet in generated_sonnets:
       f.write(f"\n{sonnet[0]}\n")
