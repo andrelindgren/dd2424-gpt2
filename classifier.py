@@ -7,6 +7,8 @@ Trains and evaluates GPT2SentimentClassifier on SST and CFIMDB
 import random, numpy as np, argparse
 from types import SimpleNamespace
 import csv
+import os
+import time
 
 import torch
 import torch.nn.functional as F
@@ -46,26 +48,42 @@ class GPT2SentimentClassifier(torch.nn.Module):
     self.gpt = GPT2Model.from_pretrained()
 
     # Pretrain mode does not require updating GPT paramters.
-    assert config.fine_tune_mode in ["last-linear-layer", "full-model"]
+    assert config.fine_tune_mode in ["last-linear-layer", "full-model", "embedding-only", "top-layers"]
     for param in self.gpt.parameters():
-      if config.fine_tune_mode == 'last-linear-layer':
+      param.requires_grad = False
+
+    if config.fine_tune_mode == 'last-linear-layer':
+      for param in self.gpt.parameters():
         param.requires_grad = False
-      elif config.fine_tune_mode == 'full-model':
+
+    elif config.fine_tune_mode == 'full-model':
+      for param in self.gpt.parameters():
         param.requires_grad = True
 
-    ### TODO: Create any instance variables you need to classify the sentiment of BERT embeddings.
-    ### YOUR CODE HERE
-    raise NotImplementedError
+    elif config.fine_tune_mode == 'embedding-only':
+      for param in self.gpt.word_embedding.parameters():
+        param.requires_grad = True
+      for param in self.gpt.pos_embedding.parameters():
+        param.requires_grad = True
+
+    elif config.fine_tune_mode == 'top-layers':
+      num_unfrozen = config.num_unfrozen_layers
+      for layer in self.gpt.gpt_layers[-num_unfrozen:]:
+        for param in layer.parameters():
+          param.requires_grad = True
+      for param in self.gpt.final_layer_norm.parameters():
+        param.requires_grad = True
+
+
+    self.dropout = torch.nn.Dropout(config.hidden_dropout_prob)
+    self.classifier_head = torch.nn.Linear(config.hidden_size, self.num_labels)
 
 
   def forward(self, input_ids, attention_mask):
     '''Takes a batch of sentences and returns logits for sentiment classes'''
-
-    ### TODO: The final GPT contextualized embedding is the hidden state of the last token.
-    ###       HINT: You should consider what is an appropriate return value given that
-    ###       the training loop currently uses F.cross_entropy as the loss function.
-    ### YOUR CODE HERE
-    raise NotImplementedError
+    last_token = self.gpt(input_ids, attention_mask)['last_token']
+    last_token = self.dropout(last_token)
+    return self.classifier_head(last_token)
 
 
 
@@ -87,7 +105,8 @@ class SentimentDataset(Dataset):
     labels = [x[1] for x in data]
     sent_ids = [x[2] for x in data]
 
-    encoding = self.tokenizer(sents, return_tensors='pt', padding=True, truncation=True)
+    encoding = self.tokenizer(sents, return_tensors='pt', padding=True, truncation=True,
+                              max_length=self.p.max_length)
     token_ids = torch.LongTensor(encoding['input_ids'])
     attention_mask = torch.LongTensor(encoding['attention_mask'])
     labels = torch.LongTensor(labels)
@@ -125,7 +144,8 @@ class SentimentTestDataset(Dataset):
     sents = [x[0] for x in data]
     sent_ids = [x[1] for x in data]
 
-    encoding = self.tokenizer(sents, return_tensors='pt', padding=True, truncation=True)
+    encoding = self.tokenizer(sents, return_tensors='pt', padding=True, truncation=True,
+                              max_length=self.p.max_length)
     token_ids = torch.LongTensor(encoding['input_ids'])
     attention_mask = torch.LongTensor(encoding['attention_mask'])
 
@@ -149,13 +169,13 @@ def load_data(filename, flag='train'):
   num_labels = {}
   data = []
   if flag == 'test':
-    with open(filename, 'r') as fp:
+    with open(filename, 'r', encoding='utf-8') as fp:
       for record in csv.DictReader(fp, delimiter='\t'):
         sent = record['sentence'].lower().strip()
         sent_id = record['id'].lower().strip()
         data.append((sent, sent_id))
   else:
-    with open(filename, 'r') as fp:
+    with open(filename, 'r', encoding='utf-8') as fp:
       for record in csv.DictReader(fp, delimiter='\t'):
         sent = record['sentence'].lower().strip()
         sent_id = record['id'].lower().strip()
@@ -259,7 +279,8 @@ def train(args):
             'num_labels': num_labels,
             'hidden_size': 768,
             'data_dir': '.',
-            'fine_tune_mode': args.fine_tune_mode}
+            'fine_tune_mode': args.fine_tune_mode,
+            'num_unfrozen_layers': args.num_unfrozen_layers}
 
   config = SimpleNamespace(**config)
 
@@ -267,15 +288,30 @@ def train(args):
   model = model.to(device)
 
   lr = args.lr
-  optimizer = AdamW(model.parameters(), lr=lr)
+  optimizer = AdamW(model.parameters(), lr=lr, weight_decay=args.weight_decay)
   best_dev_acc = 0
+
+  # For my timekeeping / memory stats
+  if args.run_name:
+    os.makedirs('results', exist_ok=True)
+    results_path = f'results/{args.run_name}.csv'
+    with open(results_path, 'w') as f:
+      f.write('epoch,train_loss,dev_acc,epoch_seconds,peak_mem_bytes\n')
 
   # Run for the specified number of epochs.
   for epoch in range(args.epochs):
     model.train()
     train_loss = 0
     num_batches = 0
-    for batch in tqdm(train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
+
+    # For my timekeeping / memory stats
+    if args.use_gpu:
+      torch.cuda.reset_peak_memory_stats()
+    epoch_start = time.perf_counter()
+
+    # For my extension: gradient accumulation
+    optimizer.zero_grad()
+    for i, batch in enumerate(tqdm(train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE)):
       b_ids, b_mask, b_labels = (batch['token_ids'],
                                  batch['attention_mask'], batch['labels'])
 
@@ -283,32 +319,51 @@ def train(args):
       b_mask = b_mask.to(device)
       b_labels = b_labels.to(device)
 
-      optimizer.zero_grad()
+      # For my extension: gradient accumulation
+      # optimizer.zero_grad()
       logits = model(b_ids, b_mask)
       loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
 
-      loss.backward()
-      optimizer.step()
+      # For my extension: gradient accumulation
+      loss = loss / args.grad_accum_steps
 
-      train_loss += loss.item()
+      loss.backward()
+
+      # For my extension: gradient accumulation
+      if (i + 1) % args.grad_accum_steps == 0:
+        optimizer.step()
+        optimizer.zero_grad()
+
+      # For my extension: gradient accumulation
+      train_loss += loss.item() * args.grad_accum_steps
       num_batches += 1
 
     train_loss = train_loss / (num_batches)
+
+    # For my timekeeping / memory stats
+    epoch_seconds = time.perf_counter() - epoch_start
+    peak_mem_bytes = torch.cuda.max_memory_allocated() if args.use_gpu else 0
 
     train_acc, train_f1, *_ = model_eval(train_dataloader, model, device)
     dev_acc, dev_f1, *_ = model_eval(dev_dataloader, model, device)
 
     if dev_acc > best_dev_acc:
       best_dev_acc = dev_acc
-      save_model(model, optimizer, args, config, args.filepath)
+      if not args.no_save:
+        save_model(model, optimizer, args, config, args.filepath)
 
     print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
+
+    # For my timekeeping / memory stats
+    if args.run_name:
+      with open(results_path, 'a') as f:
+        f.write(f'{epoch},{train_loss},{dev_acc},{epoch_seconds},{peak_mem_bytes}\n')
 
 
 def test(args):
   with torch.no_grad():
     device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
-    saved = torch.load(args.filepath)
+    saved = torch.load(args.filepath, weights_only=False)
     config = saved['model_config']
     model = GPT2SentimentClassifier(config)
     model.load_state_dict(saved['model'])
@@ -348,14 +403,25 @@ def get_args():
   parser.add_argument("--seed", type=int, default=11711)
   parser.add_argument("--epochs", type=int, default=10)
   parser.add_argument("--fine-tune-mode", type=str,
-                      help='last-linear-layer: the GPT parameters are frozen and the task specific head parameters are updated; full-model: GPT parameters are updated as well',
-                      choices=('last-linear-layer', 'full-model'), default="last-linear-layer")
+                      help='last-linear-layer: the GPT parameters are frozen and the task specific head parameters are updated; '
+                           'full-model: GPT parameters are updated as well'
+                           'embedding-only: word+pos embeddings are also trained; '
+                           'top-layers: last --num_unfrozen_layers transformer layers are also trained; ',
+                      choices=('last-linear-layer', 'full-model', 'embedding-only', 'top-layers'),
+                      default="last-linear-layer")
+  parser.add_argument("--num_unfrozen_layers", type=int, default=2)
   parser.add_argument("--use_gpu", action='store_true')
 
   parser.add_argument("--batch_size", help='sst: 64, cfimdb: 8 can fit a 12GB GPU', type=int, default=8)
   parser.add_argument("--hidden_dropout_prob", type=float, default=0.3)
+  parser.add_argument("--weight_decay", type=float, default=0.0)
   parser.add_argument("--lr", type=float, help="learning rate, default lr for 'pretrain': 1e-3, 'finetune': 1e-5",
                       default=1e-3)
+  parser.add_argument("--dataset", type=str, choices=('sst', 'cfimdb', 'both'), default='both')
+  parser.add_argument("--grad_accum_steps", type=int, default=1)
+  parser.add_argument("--max_length", type=int, default=None)
+  parser.add_argument("--run_name", type=str, default=None)
+  parser.add_argument("--no_save", action='store_true')
 
   args = parser.parse_args()
   return args
@@ -365,44 +431,64 @@ if __name__ == "__main__":
   args = get_args()
   seed_everything(args.seed)
 
-  print('Training Sentiment Classifier on SST...')
-  config = SimpleNamespace(
-    filepath='sst-classifier.pt',
-    lr=args.lr,
-    use_gpu=args.use_gpu,
-    epochs=args.epochs,
-    batch_size=args.batch_size,
-    hidden_dropout_prob=args.hidden_dropout_prob,
-    train='data/ids-sst-train.csv',
-    dev='data/ids-sst-dev.csv',
-    test='data/ids-sst-test-student.csv',
-    fine_tune_mode=args.fine_tune_mode,
-    dev_out='predictions/' + args.fine_tune_mode + '-sst-dev-out.csv',
-    test_out='predictions/' + args.fine_tune_mode + '-sst-test-out.csv'
-  )
+  if args.dataset in ('sst', 'both'):
+    print('Training Sentiment Classifier on SST...')
+    config = SimpleNamespace(
+      filepath='sst-classifier.pt',
+      lr=args.lr,
+      use_gpu=args.use_gpu,
+      epochs=args.epochs,
+      batch_size=args.batch_size,
+      hidden_dropout_prob=args.hidden_dropout_prob,
+      grad_accum_steps=args.grad_accum_steps,
+      num_unfrozen_layers=args.num_unfrozen_layers,
+      weight_decay=args.weight_decay,
+      max_length=args.max_length,
+      run_name=args.run_name,
+      no_save=args.no_save,
+      train='data/ids-sst-train.csv',
+      dev='data/ids-sst-dev.csv',
+      test='data/ids-sst-test-student.csv',
+      fine_tune_mode=args.fine_tune_mode,
+      dev_out='predictions/' + args.fine_tune_mode + '-sst-dev-out.csv',
+      test_out='predictions/' + args.fine_tune_mode + '-sst-test-out.csv'
+    )
 
-  train(config)
+    train(config)
 
-  print('Evaluating on SST...')
-  test(config)
+    if args.no_save:
+      print('Skipping SST test')
+    else:
+      print('Evaluating on SST...')
+      test(config)
 
-  print('Training Sentiment Classifier on cfimdb...')
-  config = SimpleNamespace(
-    filepath='cfimdb-classifier.pt',
-    lr=args.lr,
-    use_gpu=args.use_gpu,
-    epochs=args.epochs,
-    batch_size=8,
-    hidden_dropout_prob=args.hidden_dropout_prob,
-    train='data/ids-cfimdb-train.csv',
-    dev='data/ids-cfimdb-dev.csv',
-    test='data/ids-cfimdb-test-student.csv',
-    fine_tune_mode=args.fine_tune_mode,
-    dev_out='predictions/' + args.fine_tune_mode + '-cfimdb-dev-out.csv',
-    test_out='predictions/' + args.fine_tune_mode + '-cfimdb-test-out.csv'
-  )
+  if args.dataset in ('cfimdb', 'both'):
+    print('Training Sentiment Classifier on cfimdb...')
+    config = SimpleNamespace(
+      filepath='cfimdb-classifier.pt',
+      lr=args.lr,
+      use_gpu=args.use_gpu,
+      epochs=args.epochs,
+      batch_size=args.batch_size,
+      hidden_dropout_prob=args.hidden_dropout_prob,
+      grad_accum_steps=args.grad_accum_steps,
+      num_unfrozen_layers=args.num_unfrozen_layers,
+      weight_decay=args.weight_decay,
+      max_length=args.max_length,
+      run_name=args.run_name,
+      no_save=args.no_save,
+      train='data/ids-cfimdb-train.csv',
+      dev='data/ids-cfimdb-dev.csv',
+      test='data/ids-cfimdb-test-student.csv',
+      fine_tune_mode=args.fine_tune_mode,
+      dev_out='predictions/' + args.fine_tune_mode + '-cfimdb-dev-out.csv',
+      test_out='predictions/' + args.fine_tune_mode + '-cfimdb-test-out.csv'
+    )
 
-  train(config)
+    train(config)
 
-  print('Evaluating on cfimdb...')
-  test(config)
+    if args.no_save:
+      print('Skipping cfimdb test')
+    else:
+      print('Evaluating on cfimdb...')
+      test(config)
