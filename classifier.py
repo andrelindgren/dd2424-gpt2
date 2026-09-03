@@ -292,6 +292,7 @@ def train(args):
   best_dev_acc = 0
 
   # For my timekeeping / memory stats
+  total_train_time = 0
   if args.run_name:
     os.makedirs('results', exist_ok=True)
     results_path = f'results/{args.run_name}.csv'
@@ -312,14 +313,13 @@ def train(args):
     # For my extension: gradient accumulation
     optimizer.zero_grad()
     for i, batch in enumerate(tqdm(train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE)):
-      b_ids, b_mask, b_labels = (batch['token_ids'],
-                                 batch['attention_mask'], batch['labels'])
+      b_ids, b_mask, b_labels = (batch['token_ids'], batch['attention_mask'], batch['labels'])
 
       b_ids = b_ids.to(device)
       b_mask = b_mask.to(device)
       b_labels = b_labels.to(device)
 
-      # For my extension: gradient accumulation
+      # Diabled for my extension: gradient accumulation
       # optimizer.zero_grad()
       logits = model(b_ids, b_mask)
       loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
@@ -342,9 +342,11 @@ def train(args):
 
     # For my timekeeping / memory stats
     epoch_seconds = time.perf_counter() - epoch_start
+    total_train_time += epoch_seconds
     peak_mem_bytes = torch.cuda.max_memory_allocated() if args.use_gpu else 0
 
-    train_acc, train_f1, *_ = model_eval(train_dataloader, model, device)
+    # TODO Commented out to save time
+    # train_acc, train_f1, *_ = model_eval(train_dataloader, model, device)
     dev_acc, dev_f1, *_ = model_eval(dev_dataloader, model, device)
 
     if dev_acc > best_dev_acc:
@@ -352,12 +354,16 @@ def train(args):
       if not args.no_save:
         save_model(model, optimizer, args, config, args.filepath)
 
-    print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
+    # TODO Commented out to save time
+    #print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
+    print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, dev acc :: {dev_acc :.3f}")
 
     # For my timekeeping / memory stats
     if args.run_name:
       with open(results_path, 'a') as f:
         f.write(f'{epoch},{train_loss},{dev_acc},{epoch_seconds},{peak_mem_bytes}\n')
+
+    print(f'total train time :: {total_train_time:.3f}s, peak mem :: {peak_mem_bytes / 1e9:.3f} GB')
 
 
 def test(args):
