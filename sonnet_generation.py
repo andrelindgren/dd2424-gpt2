@@ -176,10 +176,13 @@ def train(args):
     print(f"Epoch {epoch}: train loss :: {train_loss :.3f}.")
     print('Generating several output sonnets...')
     model.eval()
-    for batch in held_out_sonnet_dataset:
-      encoding = model.tokenizer(batch[1], return_tensors='pt', padding=True, truncation=True).to(device)
-      output = model.generate(encoding['input_ids'], temperature=args.temperature, top_p=args.top_p)
-      print(f'{batch[1]}{output[1]}\n\n')
+
+    generate_during_training = False
+    if generate_during_training:
+      for batch in held_out_sonnet_dataset:
+        encoding = model.tokenizer(batch[1], return_tensors='pt', padding=True, truncation=True).to(device)
+        output = model.generate(encoding['input_ids'], temperature=args.temperature, top_p=args.top_p)
+        print(f'{batch[1]}{output[1]}\n\n')
 
     # TODO: consider a stopping condition to prevent overfitting on the small dataset of sonnets.
     save_model(model, optimizer, args, args.filepath)
@@ -207,7 +210,8 @@ def generate_submission_sonnets(args):
     full_sonnet = f'{decoded_output}\n\n'
     generated_sonnets.append((sonnet_id, full_sonnet))
 
-    print(f'{decoded_output}\n\n')
+    # TODO changed to speed up
+    #print(f'{decoded_output}\n\n')
 
   with open(args.sonnet_out, "w+", encoding='utf-8') as f:
     f.write(f"--Generated Sonnets-- \n\n")
