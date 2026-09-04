@@ -288,9 +288,15 @@ def stage_cfimdb():
 
   b = best_row('sst', 'full', ['lr', 'reg'])
   lr = float(b['lr'])
-  for factor, tag in [(1.0, 'best'), (0.3, 'lower')]:
-    run_gpt('cfimdb', 'transfer', f'cfimdb-full-{tag}', lr * factor, unfrozen=12,
+  run_gpt('cfimdb', 'transfer', f'cfimdb-full-best', lr, unfrozen=12,
             dropout=float(b['dropout']), wd=float(b['weight_decay']))
+
+
+def stage_cfimdb_seeds():
+  b = best_row('cfimdb', 'full', ['transfer'])
+  for seed in [1, 2, 3]:
+    run_gpt('cfimdb', 'seed', f'cfimdb-full-seed{seed}', float(b['lr']), unfrozen=12,
+            dropout=float(b['dropout']), wd=float(b['weight_decay']), seed=seed)
 
 
 def spent_seconds(dataset, arm, stages):
@@ -333,10 +339,11 @@ STAGES = {
   'reg': stage_reg,
   'seeds': stage_seeds,
   'cfimdb': stage_cfimdb,
+  'cfimdb_seeds': stage_cfimdb_seeds,
   'head_budget': stage_head_budget,
 }
 
-ORDER = ['extract', 'lr_head', 'lr_full', 'ladder', 'reg', 'seeds', 'cfimdb', 'head_budget']
+ORDER = ['extract', 'lr_head', 'lr_full', 'ladder', 'reg', 'seeds', 'cfimdb', 'cfimdb_seeds', 'head_budget']
 
 
 if __name__ == '__main__':

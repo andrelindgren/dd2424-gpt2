@@ -21,7 +21,10 @@ wrote results/anytime_sst.png
 === cfimdb ===
 arm       runs    best        lr    steps    s/run  mem GB
 head         6  0.8449   3.0e-03     4270      2.9    0.02
-full         2  0.9837   1.0e-05     4270    608.9    2.83
+full         4  0.9837   1.0e-05     4270    603.6    2.83
 Seed spread for best models
+full: 3 seeds, dev acc 0.9755 +/- 0.0041 (std)
 
 dev n=245: two runs differing by less than 0.022 can be considered equal
+
+Process finished with exit code 0
