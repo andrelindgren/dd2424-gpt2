@@ -1,6 +1,6 @@
 #
 # LLM disclosure: Generated boilerplate/scaffolding file that does the following I asked:
-# 1. Do a sweep over checkpoints x (temperature, top_p)
+# 1. Do a sweep over checkpoints x temperature x top_p
 #
 # I myself picked the range of temps and top_p
 #
